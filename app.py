@@ -15,6 +15,7 @@ import streamlit as st
 
 from lib import store, auth, importer
 from lib.branding import APP_TITLE, COMPANY_NAME, ACCENT
+from lib.dates import format_range, parse_range
 from lib.calculations import compute_monthly, compute_period
 from lib.html_templates import build_monthly_html, build_weekly_html
 from lib.png_render import render_monthly_png, render_weekly_png
@@ -196,19 +197,25 @@ def _import_box(prefix: str):
 
 def _apply_monthly_import(record_key: str, blocks: list):
     weeks, _total = importer.split_total(blocks)   # the month-total row is recalculated by the app
-    rows = [{
-        "Week Label": f"Week {i + 1}", "Date Range": b["label"], "Production": b["production"],
-        "Rejection In": b["rej_in"], "Rejection Out": b["rej_out"],
-        "Alteration In": b["alt_in"], "Alteration Out": b["alt_out"],
-    } for i, b in enumerate(weeks)]
+    yy, mm = record_key.split("|", 1)[1].split("-")
+    rows = []
+    for i, b in enumerate(weeks):
+        pr = parse_range(b["label"], int(yy), int(mm))
+        rows.append({
+            "Week Label": f"Week {i + 1}", "From": pr[0] if pr else None, "To": pr[1] if pr else None,
+            "Production": b["production"],
+            "Rejection In": b["rej_in"], "Rejection Out": b["rej_out"],
+            "Alteration In": b["alt_in"], "Alteration Out": b["alt_out"],
+        })
     prev = st.session_state.get("monthly_seed", {})
     st.session_state["monthly_seed"] = {"record_key": record_key, "rows": rows,
                                          "nonce": prev.get("nonce", 0) + 1}
 
 
 def _apply_weekly_values(period: str | None, d: dict):
-    if period:
-        st.session_state["weekly_period"] = period
+    pr = parse_range(period or "", date.today().year)
+    if pr:
+        st.session_state["weekly_dates"] = pr
     st.session_state["weekly_production"] = int(d.get("production", 0))
     st.session_state["weekly_rej_in"] = int(d.get("rej_in", 0))
     st.session_state["weekly_rej_out"] = int(d.get("rej_out", 0))
@@ -230,24 +237,33 @@ def _apply_weekly_saved(unit: str):
 
 
 # ----------------------------------------------------------- monthly tab ----
+def _date_cols(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ("From", "To"):
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    return df
+
+
 def _empty_week_df(n=4):
-    return pd.DataFrame([
-        {"Week Label": f"Week {i+1}", "Date Range": "", "Production": 0,
+    df = pd.DataFrame([
+        {"Week Label": f"Week {i+1}", "From": None, "To": None, "Production": 0,
          "Rejection In": 0, "Rejection Out": 0, "Alteration In": 0, "Alteration Out": 0}
         for i in range(n)
     ])
+    return _date_cols(df)
 
 
 def _record_to_df(record: dict) -> pd.DataFrame:
     rows = []
     for w in record.get("weeks", []):
+        pr = parse_range(w.get("range", ""), date.today().year)
         rows.append({
-            "Week Label": w.get("label", ""), "Date Range": w.get("range", ""),
+            "Week Label": w.get("label", ""),
+            "From": pr[0] if pr else None, "To": pr[1] if pr else None,
             "Production": w.get("production", 0), "Rejection In": w.get("rej_in", 0),
             "Rejection Out": w.get("rej_out", 0), "Alteration In": w.get("alt_in", 0),
             "Alteration Out": w.get("alt_out", 0),
         })
-    return pd.DataFrame(rows) if rows else _empty_week_df()
+    return _date_cols(pd.DataFrame(rows)) if rows else _empty_week_df()
 
 
 def _no_units_warning(user: dict):
@@ -282,19 +298,24 @@ def render_monthly_tab(user: dict):
                       on_click=_apply_monthly_import, args=(record_key, blocks))
 
     last_day = calendar.monthrange(year, month_num)[1]
-    range_key = f"monthly_total_range_{record_key}"
-    st.session_state.setdefault(
-        range_key,
-        (existing or {}).get("meta", {}).get("total_range") or f"1st – {ordinal(last_day)} {month_name} {year}",
-    )
-    total_range = st.text_input("Monthly total date-range label", key=range_key)
+    range_key = f"monthly_total_dates_{record_key}"
+    if range_key not in st.session_state:
+        saved = parse_range((existing or {}).get("meta", {}).get("total_range", ""), year, month_num)
+        st.session_state[range_key] = saved or (date(year, month_num, 1), date(year, month_num, last_day))
+    picked = st.date_input("Monthly total date range (pick start and end date)", key=range_key,
+                           format="DD/MM/YYYY")
+    if isinstance(picked, (tuple, list)) and len(picked) == 2:
+        total_range = format_range(picked[0], picked[1])
+    else:
+        total_range = format_range(date(year, month_num, 1), date(year, month_num, last_day))
+        st.caption("Select the end date to finish the range.")
 
     st.markdown("##### Weekly inputs")
     st.caption("Add or remove rows for however many periods this month needs. Percentages, confirmed-rejection rate, and the monthly total are all calculated automatically.")
 
     seed = st.session_state.get("monthly_seed")
     if seed and seed["record_key"] == record_key:
-        default_df, nonce = pd.DataFrame(seed["rows"]), seed["nonce"]
+        default_df, nonce = _date_cols(pd.DataFrame(seed["rows"])), seed["nonce"]
     else:
         default_df, nonce = (_record_to_df(existing) if existing else _empty_week_df()), 0
     edited_df = st.data_editor(
@@ -304,7 +325,8 @@ def render_monthly_tab(user: dict):
         key=f"monthly_editor_{record_key}_{nonce}",
         column_config={
             "Week Label": st.column_config.TextColumn(width="small"),
-            "Date Range": st.column_config.TextColumn(width="medium"),
+            "From": st.column_config.DateColumn("From (click to pick)", format="DD MMM YYYY", width="medium"),
+            "To": st.column_config.DateColumn("To (click to pick)", format="DD MMM YYYY", width="medium"),
             "Production": st.column_config.NumberColumn(min_value=0, step=1),
             "Rejection In": st.column_config.NumberColumn(min_value=0, step=1),
             "Rejection Out": st.column_config.NumberColumn(min_value=0, step=1),
@@ -323,7 +345,8 @@ def render_monthly_tab(user: dict):
                 continue
             rows.append({
                 "label": str(r["Week Label"]).strip(),
-                "range": str(r.get("Date Range", "") or "").strip(),
+                "range": (format_range(r["From"].date(), r["To"].date(), short=True)
+                          if pd.notna(r.get("From")) and pd.notna(r.get("To")) else ""),
                 "production": float(r.get("Production") or 0),
                 "rej_in": float(r.get("Rejection In") or 0),
                 "rej_out": float(r.get("Rejection Out") or 0),
@@ -362,7 +385,14 @@ def render_weekly_tab(user: dict):
 
     col1, col2 = st.columns([1, 2])
     unit = col1.selectbox("Unit", units, key="weekly_unit")
-    period_label = col2.text_input("Date range label (e.g. 11th – 27th July 2026)", key="weekly_period")
+    st.session_state.setdefault("weekly_dates", (date.today(), date.today()))
+    picked = col2.date_input("Date range (pick start and end date)", key="weekly_dates",
+                             format="DD/MM/YYYY")
+    if isinstance(picked, (tuple, list)) and len(picked) == 2:
+        period_label = format_range(picked[0], picked[1])
+    else:
+        period_label = ""
+        col2.caption("Select the end date to finish the range.")
 
     with st.expander("📥 Fill from a file (Excel or screenshot)"):
         blocks = _import_box("weekly")
@@ -396,7 +426,7 @@ def render_weekly_tab(user: dict):
     state_key = f"weekly_ctx_{unit}"
     if generate:
         if not period_label.strip():
-            st.error("Enter a date-range label first (e.g. '11th – 27th July 2026').")
+            st.error("Pick the start and end date of the range first.")
         else:
             data = compute_period({
                 "production": production, "rej_in": rej_in, "rej_out": rej_out,
