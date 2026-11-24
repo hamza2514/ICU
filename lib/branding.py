@@ -18,4 +18,4 @@ ACCENT = "#2563eb"
 ACCENT_BG = "rgba(37,99,235,0.08)"
 
 COMPANY_NAME = "Artistic Milliners"
-APP_TITLE = "ICU Dashboard Studio"
+APP_TITLE = "ICU/Rejection Dashboard"
