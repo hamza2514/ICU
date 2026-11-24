@@ -15,6 +15,14 @@ with login, an in-app admin panel, unit assignment, and PNG / HTML export.
 - **Admin**: all units, create/edit/delete users, manage units, download **PNG and HTML**, backup/restore.
 - **User**: only assigned units, download **PNG** only.
 
+## Filling the dashboard from a file
+Both dashboard tabs have **"Fill from a file"**: upload your summary table as an **Excel (.xlsx)** file or a
+**screenshot (.png/.jpg)**. The app reads Units + Production under the four headers
+(Rejections In/Out, Alteration In/Out), shows what it found, and loads it into the editable inputs.
+It cross-checks each row against the file's own "Net Confirmed Rejection" and flags any mismatch.
+Screenshots are read with OCR (needs `packages.txt` -> `tesseract-ocr`, installed automatically on Streamlit Cloud);
+always glance over screenshot-read numbers and date labels before generating.
+
 ## How the numbers work
 You enter only raw figures per period (Production, Rejection In/Out, Alteration In/Out).
 Everything else is calculated: percentages, Confirmed Rejection = (Rejection In - Rejection Out) / Production,

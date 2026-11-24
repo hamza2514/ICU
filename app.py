@@ -13,7 +13,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from lib import store, auth
+from lib import store, auth, importer
 from lib.branding import APP_TITLE, COMPANY_NAME, ACCENT
 from lib.calculations import compute_monthly, compute_period
 from lib.html_templates import build_monthly_html, build_weekly_html
@@ -56,8 +56,7 @@ def render_initial_setup():
     with st.form("setup_admin_form"):
         col1, col2 = st.columns(2)
         username = col1.text_input("Admin username")
-        full_name = col2.text_input("Full name", value="")
-        email = st.text_input("Email (used on dashboard footers)")
+        full_name = col2.text_input("Full name (optional)", value="")
         col3, col4 = st.columns(2)
         password = col3.text_input("Password", type="password")
         password2 = col4.text_input("Confirm password", type="password")
@@ -79,7 +78,6 @@ def render_initial_setup():
                 "password_hash": pw_hash,
                 "role": "admin",
                 "full_name": full_name or username,
-                "email": email,
                 "units": [],  # admins implicitly see all units
                 "active": True,
                 "created_at": store.now_iso(),
@@ -132,6 +130,105 @@ def ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
+# ------------------------------------------------------- file import UI ----
+def _import_box(prefix: str):
+    """Upload widget + preview of what was read. Returns the parsed blocks
+    (list of dicts) when a file was read successfully, else None."""
+    up = st.file_uploader(
+        "Excel file (.xlsx) or a screenshot (.png / .jpg) of your summary table",
+        type=["xlsx", "xlsm", "png", "jpg", "jpeg"],
+        key=f"{prefix}_upload",
+    )
+    if up is None:
+        st.session_state.pop(f"{prefix}_parsed", None)
+        return None
+
+    sig = (up.name, up.size)
+    cache = st.session_state.get(f"{prefix}_parsed")
+    if not cache or cache["sig"] != sig:
+        data, blocks, err = up.getvalue(), [], None
+        with st.spinner("Reading your file..."):
+            try:
+                if up.name.lower().endswith((".xlsx", ".xlsm")):
+                    blocks = importer.parse_excel(data)
+                else:
+                    blocks = importer.parse_image(data)
+            except Exception as e:  # noqa: BLE001 - show any reader problem to the user
+                if "tesseract" in type(e).__name__.lower() or "tesseract" in str(e).lower():
+                    err = "Image reading isn't available on this server right now. Please upload the Excel file instead."
+                else:
+                    err = f"Couldn't read that file ({type(e).__name__}). Try the Excel version or enter the numbers manually."
+        cache = {"sig": sig, "blocks": blocks, "err": err}
+        st.session_state[f"{prefix}_parsed"] = cache
+
+    if cache["err"]:
+        st.error(cache["err"])
+        return None
+    blocks = cache["blocks"]
+    if not blocks:
+        st.error(
+            "Couldn't find a table with the headers Rejections In / Rejections Out / "
+            "Alteration In / Alteration Out in that file. Please enter the numbers manually."
+        )
+        return None
+
+    rows, any_warning = [], False
+    for b in blocks:
+        warn = importer.check_block(b)
+        any_warning = any_warning or bool(warn)
+        if b.get("confirmed_src") is None:
+            status = "–"
+        else:
+            status = f"⚠️ {warn}" if warn else "✅ matches file"
+        rows.append({
+            "Period": b["label"] or "(no label found)", "Production": b["production"],
+            "Rejection In": b["rej_in"], "Rejection Out": b["rej_out"],
+            "Alteration In": b["alt_in"], "Alteration Out": b["alt_out"],
+            "Check vs file's Net Confirmed Rejection": status,
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if any_warning:
+        st.warning("Some rows don't match the file's own confirmed-rejection figure — a digit may have been misread. Please check them against your file after loading.")
+    else:
+        st.caption("Please glance over the numbers against your file before generating — you can still edit everything.")
+    return blocks
+
+
+def _apply_monthly_import(record_key: str, blocks: list):
+    weeks, _total = importer.split_total(blocks)   # the month-total row is recalculated by the app
+    rows = [{
+        "Week Label": f"Week {i + 1}", "Date Range": b["label"], "Production": b["production"],
+        "Rejection In": b["rej_in"], "Rejection Out": b["rej_out"],
+        "Alteration In": b["alt_in"], "Alteration Out": b["alt_out"],
+    } for i, b in enumerate(weeks)]
+    prev = st.session_state.get("monthly_seed", {})
+    st.session_state["monthly_seed"] = {"record_key": record_key, "rows": rows,
+                                         "nonce": prev.get("nonce", 0) + 1}
+
+
+def _apply_weekly_values(period: str | None, d: dict):
+    if period:
+        st.session_state["weekly_period"] = period
+    st.session_state["weekly_production"] = int(d.get("production", 0))
+    st.session_state["weekly_rej_in"] = int(d.get("rej_in", 0))
+    st.session_state["weekly_rej_out"] = int(d.get("rej_out", 0))
+    st.session_state["weekly_alt_in"] = int(d.get("alt_in", 0))
+    st.session_state["weekly_alt_out"] = int(d.get("alt_out", 0))
+
+
+def _apply_weekly_import(blocks: list):
+    idx = st.session_state.get("weekly_block_pick", 0) if len(blocks) > 1 else 0
+    b = blocks[idx]
+    _apply_weekly_values(b["label"] or None, b)
+
+
+def _apply_weekly_saved(unit: str):
+    period = st.session_state.get("weekly_saved_pick")
+    rec = store.get_weekly_record(f"{unit}|{period}") if period and period != "—" else None
+    if rec:
+        _apply_weekly_values(period, rec.get("data", {}))
+
+
 # ----------------------------------------------------------- monthly tab ----
 def _empty_week_df(n=4):
     return pd.DataFrame([
@@ -153,13 +250,17 @@ def _record_to_df(record: dict) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else _empty_week_df()
 
 
+def _no_units_warning(user: dict):
+    if user.get("role") == "admin":
+        st.warning("No units exist yet. Add one in the Admin Panel tab first.")
+    else:
+        st.warning("No unit has been assigned to your account yet. Ask your admin to assign one.")
+
+
 def render_monthly_tab(user: dict):
     units = available_units(user)
     if not units:
-        if user.get("role") == "admin":
-            st.warning("No units exist yet. Add one in the Admin Panel tab first.")
-        else:
-            st.warning("No unit has been assigned to your account yet. Ask your admin to assign one.")
+        _no_units_warning(user)
         return
 
     col1, col2, col3 = st.columns([1.2, 1, 1])
@@ -174,26 +275,33 @@ def render_monthly_tab(user: dict):
     if existing:
         st.info(f"A saved record already exists for {unit} · {month_name} {year}. Editing it below will overwrite it when you regenerate.")
 
-    with st.expander("Prepared-by details", expanded=False):
-        pb_col1, pb_col2, pb_col3 = st.columns(3)
-        prepared_by = pb_col1.text_input("Prepared by", value=existing.get("meta", {}).get("prepared_by") if existing else user.get("full_name", ""), key="monthly_prepared_by")
-        prepared_role = pb_col2.text_input("Role", value=existing.get("meta", {}).get("prepared_role") if existing else f"IE Manager {unit}", key="monthly_prepared_role")
-        prepared_email = pb_col3.text_input("Email", value=existing.get("meta", {}).get("prepared_email") if existing else user.get("email", ""), key="monthly_prepared_email")
+    with st.expander("📥 Fill from a file (Excel or screenshot)"):
+        blocks = _import_box("monthly")
+        if blocks:
+            st.button("Use this data", type="primary", key="monthly_use_import",
+                      on_click=_apply_monthly_import, args=(record_key, blocks))
 
     last_day = calendar.monthrange(year, month_num)[1]
-    total_range_default = existing.get("meta", {}).get("total_range") if existing else f"1st – {ordinal(last_day)} {month_name} {year}"
-    total_range = st.text_input("Monthly total date-range label", value=total_range_default, key="monthly_total_range")
+    range_key = f"monthly_total_range_{record_key}"
+    st.session_state.setdefault(
+        range_key,
+        (existing or {}).get("meta", {}).get("total_range") or f"1st – {ordinal(last_day)} {month_name} {year}",
+    )
+    total_range = st.text_input("Monthly total date-range label", key=range_key)
 
     st.markdown("##### Weekly inputs")
     st.caption("Add or remove rows for however many periods this month needs. Percentages, confirmed-rejection rate, and the monthly total are all calculated automatically.")
 
-    default_df = _record_to_df(existing) if existing else _empty_week_df()
-    editor_key = f"monthly_editor_{record_key}"
+    seed = st.session_state.get("monthly_seed")
+    if seed and seed["record_key"] == record_key:
+        default_df, nonce = pd.DataFrame(seed["rows"]), seed["nonce"]
+    else:
+        default_df, nonce = (_record_to_df(existing) if existing else _empty_week_df()), 0
     edited_df = st.data_editor(
         default_df,
         num_rows="dynamic",
         use_container_width=True,
-        key=editor_key,
+        key=f"monthly_editor_{record_key}_{nonce}",
         column_config={
             "Week Label": st.column_config.TextColumn(width="small"),
             "Date Range": st.column_config.TextColumn(width="medium"),
@@ -215,7 +323,7 @@ def render_monthly_tab(user: dict):
                 continue
             rows.append({
                 "label": str(r["Week Label"]).strip(),
-                "range": str(r.get("Date Range", "")).strip(),
+                "range": str(r.get("Date Range", "") or "").strip(),
                 "production": float(r.get("Production") or 0),
                 "rej_in": float(r.get("Rejection In") or 0),
                 "rej_out": float(r.get("Rejection Out") or 0),
@@ -231,15 +339,9 @@ def render_monthly_tab(user: dict):
                 "unit": unit,
                 "period": total_range,
                 "month_label": f"{month_name} {year}",
-                "prepared_by": prepared_by,
-                "prepared_role": prepared_role,
-                "prepared_email": prepared_email,
                 "total_range": total_range,
             }
-            store.save_monthly_record(record_key, {
-                "meta": calc["meta"],
-                "weeks": rows,
-            })
+            store.save_monthly_record(record_key, {"meta": calc["meta"], "weeks": rows})
             st.session_state[state_key] = calc
             st.success("Dashboard generated and saved.")
 
@@ -252,33 +354,42 @@ def render_monthly_tab(user: dict):
 def render_weekly_tab(user: dict):
     units = available_units(user)
     if not units:
-        if user.get("role") == "admin":
-            st.warning("No units exist yet. Add one in the Admin Panel tab first.")
-        else:
-            st.warning("No unit has been assigned to your account yet. Ask your admin to assign one.")
+        _no_units_warning(user)
         return
+
+    for k in ("weekly_production", "weekly_rej_in", "weekly_rej_out", "weekly_alt_in", "weekly_alt_out"):
+        st.session_state.setdefault(k, 0)
 
     col1, col2 = st.columns([1, 2])
     unit = col1.selectbox("Unit", units, key="weekly_unit")
     period_label = col2.text_input("Date range label (e.g. 11th – 27th July 2026)", key="weekly_period")
 
-    record_key = f"{unit}|{period_label}" if period_label else None
-    existing = store.get_weekly_record(record_key) if record_key else None
+    with st.expander("📥 Fill from a file (Excel or screenshot)"):
+        blocks = _import_box("weekly")
+        if blocks:
+            if len(blocks) > 1:
+                st.selectbox(
+                    "Which row of the file should this dashboard use?",
+                    options=list(range(len(blocks))),
+                    format_func=lambda i: f"{blocks[i]['label'] or 'Row ' + str(i + 1)} — production {blocks[i]['production']:,}",
+                    key="weekly_block_pick",
+                )
+            st.button("Use this data", type="primary", key="weekly_use_import",
+                      on_click=_apply_weekly_import, args=(blocks,))
 
-    with st.expander("Prepared-by details", expanded=False):
-        pb_col1, pb_col2, pb_col3 = st.columns(3)
-        prepared_by = pb_col1.text_input("Prepared by", value=existing.get("meta", {}).get("prepared_by") if existing else user.get("full_name", ""), key="weekly_prepared_by")
-        prepared_role = pb_col2.text_input("Role", value=existing.get("meta", {}).get("prepared_role") if existing else f"IE Manager {unit}", key="weekly_prepared_role")
-        prepared_email = pb_col3.text_input("Email", value=existing.get("meta", {}).get("prepared_email") if existing else user.get("email", ""), key="weekly_prepared_email")
+    saved_periods = [k.split("|", 1)[1] for k in store.load_weekly_records().get("records", {}) if k.startswith(f"{unit}|")]
+    if saved_periods:
+        with st.expander("📂 Open a saved weekly dashboard"):
+            st.selectbox("Saved periods", ["—"] + saved_periods, key="weekly_saved_pick")
+            st.button("Load", key="weekly_load_saved", on_click=_apply_weekly_saved, args=(unit,))
 
     st.markdown("##### Period inputs")
-    d = existing.get("data", {}) if existing else {}
     c1, c2, c3, c4, c5 = st.columns(5)
-    production = c1.number_input("Production", min_value=0, value=int(d.get("production", 0)), step=1)
-    rej_in = c2.number_input("Rejection In", min_value=0, value=int(d.get("rej_in", 0)), step=1)
-    rej_out = c3.number_input("Rejection Out", min_value=0, value=int(d.get("rej_out", 0)), step=1)
-    alt_in = c4.number_input("Alteration In", min_value=0, value=int(d.get("alt_in", 0)), step=1)
-    alt_out = c5.number_input("Alteration Out", min_value=0, value=int(d.get("alt_out", 0)), step=1)
+    production = c1.number_input("Production", min_value=0, step=1, key="weekly_production")
+    rej_in = c2.number_input("Rejection In", min_value=0, step=1, key="weekly_rej_in")
+    rej_out = c3.number_input("Rejection Out", min_value=0, step=1, key="weekly_rej_out")
+    alt_in = c4.number_input("Alteration In", min_value=0, step=1, key="weekly_alt_in")
+    alt_out = c5.number_input("Alteration Out", min_value=0, step=1, key="weekly_alt_out")
 
     generate = st.button("Generate weekly dashboard", type="primary", key="weekly_generate")
 
@@ -291,14 +402,9 @@ def render_weekly_tab(user: dict):
                 "production": production, "rej_in": rej_in, "rej_out": rej_out,
                 "alt_in": alt_in, "alt_out": alt_out,
             })
-            meta = {
-                "unit": unit, "period": period_label,
-                "prepared_by": prepared_by, "prepared_role": prepared_role,
-                "prepared_email": prepared_email,
-            }
-            ctx = {"meta": meta, "data": data}
-            store.save_weekly_record(record_key, {"meta": meta, "data": data})
-            st.session_state[state_key] = ctx
+            meta = {"unit": unit, "period": period_label.strip()}
+            store.save_weekly_record(f"{unit}|{period_label.strip()}", {"meta": meta, "data": data})
+            st.session_state[state_key] = {"meta": meta, "data": data}
             st.success("Dashboard generated and saved.")
 
     ctx = st.session_state.get(state_key)
@@ -380,9 +486,7 @@ def render_admin_panel():
             c1, c2 = st.columns(2)
             new_username = c1.text_input("Username")
             new_full_name = c2.text_input("Full name")
-            c3, c4 = st.columns(2)
-            new_email = c3.text_input("Email")
-            new_role = c4.selectbox("Role", ["user", "admin"])
+            new_role = st.selectbox("Role", ["user", "admin"])
             assigned_units = st.multiselect("Assign unit(s)", all_units)
             new_password = st.text_input("Temporary password (leave blank to auto-generate)")
             if st.form_submit_button("Create user", type="primary"):
@@ -396,7 +500,7 @@ def render_admin_panel():
                     store.upsert_user(new_username.strip(), {
                         "password_salt": salt, "password_hash": pw_hash,
                         "role": new_role, "full_name": new_full_name or new_username.strip(),
-                        "email": new_email, "units": assigned_units, "active": True,
+                        "units": assigned_units, "active": True,
                         "created_at": store.now_iso(),
                     })
                     st.success(f"User '{new_username.strip()}' created. Temporary password: `{pw}`")
