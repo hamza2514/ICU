@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.streamlit/secrets.toml
+# Runtime data (users, units, saved dashboards) - never commit real user data
+data/*.json
+data/*.tmp
