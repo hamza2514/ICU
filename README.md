@@ -1,4 +1,4 @@
-# ICU Dashboard Studio
+# ICU/Rejection Dashboard
 
 Streamlit app for building the monthly and weekly ICU (Input vs Output) dashboards,
 with login, an in-app admin panel, unit assignment, and PNG / HTML export.

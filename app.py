@@ -1,4 +1,4 @@
-"""ICU Dashboard Studio
+"""ICU/Rejection Dashboard
 Streamlit multi-user app for building the Monthly & Weekly ICU dashboards.
 
 Deploy: push this whole folder to a GitHub repo and point Streamlit
@@ -14,13 +14,16 @@ import pandas as pd
 import streamlit as st
 
 from lib import store, auth, importer
+import os
 from lib.branding import APP_TITLE, COMPANY_NAME, ACCENT
+
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo.jpg")
 from lib.dates import format_range, parse_range
 from lib.calculations import compute_monthly, compute_period
 from lib.html_templates import build_monthly_html, build_weekly_html
 from lib.png_render import render_monthly_png, render_weekly_png
 
-st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
+st.set_page_config(page_title=APP_TITLE, page_icon=LOGO_PATH, layout="wide")
 
 MONTH_NAMES = list(calendar.month_name)[1:]
 
@@ -30,7 +33,7 @@ def inject_css():
     st.markdown(
         f"""
         <style>
-        .block-container {{ padding-top: 2rem; max-width: 1200px; }}
+        .block-container {{ padding-top: 3.5rem; max-width: 1200px; }}
         .am-brand {{ display:flex; align-items:center; gap:10px; margin-bottom: 0.5rem; }}
         .am-brand .dot {{ width:12px; height:12px; border-radius:50%; background:{ACCENT}; }}
         div[data-testid="stForm"] {{ border:1px solid rgba(0,0,0,0.08); border-radius:14px; padding:1.4rem; }}
@@ -93,11 +96,15 @@ def render_initial_setup():
 def render_login():
     left, mid, right = st.columns([1, 1.3, 1])
     with mid:
+        st.markdown("<div style='height:2.5rem'></div>", unsafe_allow_html=True)
+        lc1, lc2, lc3 = st.columns([1, 1, 1])
+        with lc2:
+            st.image(LOGO_PATH, use_container_width=True)
         st.markdown(
-            f"<div class='am-brand'><div class='dot'></div>"
-            f"<b>{COMPANY_NAME}</b></div>", unsafe_allow_html=True,
+            f"<h2 style='text-align:center;margin:0.4rem 0 0;'>{COMPANY_NAME}</h2>"
+            f"<h4 style='text-align:center;margin:0 0 1rem;font-weight:500;color:{ACCENT};'>{APP_TITLE}</h4>",
+            unsafe_allow_html=True,
         )
-        st.markdown(f"## {APP_TITLE}")
         st.caption("Sign in to build and download your ICU dashboards.")
         with st.form("login_form"):
             username = st.text_input("Username")
@@ -311,47 +318,73 @@ def render_monthly_tab(user: dict):
         st.caption("Select the end date to finish the range.")
 
     st.markdown("##### Weekly inputs")
-    st.caption("Add or remove rows for however many periods this month needs. Percentages, confirmed-rejection rate, and the monthly total are all calculated automatically.")
+    st.caption("Pick each week's dates from the calendar and enter the numbers. Use the buttons to add or remove weeks. Percentages, confirmed-rejection rate, and the monthly total are calculated automatically.")
 
+    # --- starting rows: file import > saved record > blank
     seed = st.session_state.get("monthly_seed")
     if seed and seed["record_key"] == record_key:
-        default_df, nonce = _date_cols(pd.DataFrame(seed["rows"])), seed["nonce"]
+        init, nonce = seed["rows"], seed["nonce"]
+    elif existing:
+        init, nonce = [], 0
+        for w in existing.get("weeks", []):
+            pr = parse_range(w.get("range", ""), year, month_num)
+            init.append({"Week Label": w.get("label", ""), "From": pr[0] if pr else None,
+                         "To": pr[1] if pr else None, "Production": int(w.get("production", 0)),
+                         "Rejection In": int(w.get("rej_in", 0)), "Rejection Out": int(w.get("rej_out", 0)),
+                         "Alteration In": int(w.get("alt_in", 0)), "Alteration Out": int(w.get("alt_out", 0))})
     else:
-        default_df, nonce = (_record_to_df(existing) if existing else _empty_week_df()), 0
-    edited_df = st.data_editor(
-        default_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"monthly_editor_{record_key}_{nonce}",
-        column_config={
-            "Week Label": st.column_config.TextColumn(width="small"),
-            "From": st.column_config.DateColumn("From (click to pick)", format="DD MMM YYYY", width="medium"),
-            "To": st.column_config.DateColumn("To (click to pick)", format="DD MMM YYYY", width="medium"),
-            "Production": st.column_config.NumberColumn(min_value=0, step=1),
-            "Rejection In": st.column_config.NumberColumn(min_value=0, step=1),
-            "Rejection Out": st.column_config.NumberColumn(min_value=0, step=1),
-            "Alteration In": st.column_config.NumberColumn(min_value=0, step=1),
-            "Alteration Out": st.column_config.NumberColumn(min_value=0, step=1),
-        },
-    )
+        init, nonce = [], 0
+    count_key = f"mcount_{record_key}_{nonce}"
+    st.session_state.setdefault(count_key, max(len(init), 4))
+    count = st.session_state[count_key]
+
+    def k(i, f):
+        return f"mr_{record_key}_{nonce}_{i}_{f}"
+
+    month_start = date(year, month_num, 1)
+    fields = ["Production", "Rejection In", "Rejection Out", "Alteration In", "Alteration Out"]
+    widths = [1.1, 2.6, 1.2, 1.2, 1.2, 1.2, 1.2]
+    heads = ["Week", "Date range (click calendar)", "Production", "Rejection In", "Rejection Out",
+             "Alteration In", "Alteration Out"]
+    for i in range(count):
+        src = init[i] if i < len(init) else {}
+        st.session_state.setdefault(k(i, "label"), src.get("Week Label") or f"Week {i + 1}")
+        if k(i, "dates") not in st.session_state:
+            f_, t_ = src.get("From"), src.get("To")
+            st.session_state[k(i, "dates")] = (f_, t_) if f_ and t_ else (month_start, month_start)
+        for f in fields:
+            st.session_state.setdefault(k(i, f), int(src.get(f, 0) or 0))
+    for i in range(count):
+        vis = "visible" if i == 0 else "collapsed"
+        cols = st.columns(widths)
+        cols[0].text_input(heads[0], key=k(i, "label"), label_visibility=vis)
+        cols[1].date_input(heads[1], key=k(i, "dates"), format="DD/MM/YYYY", label_visibility=vis)
+        for c, f, h in zip(cols[2:], fields, heads[2:]):
+            c.number_input(h, min_value=0, step=1, key=k(i, f), label_visibility=vis)
+    b1, b2, _sp = st.columns([1, 1, 4])
+    b1.button("➕ Add week", key=f"madd_{record_key}_{nonce}",
+              on_click=lambda: st.session_state.__setitem__(count_key, st.session_state[count_key] + 1))
+    b2.button("➖ Remove last", key=f"mdel_{record_key}_{nonce}", disabled=count <= 1,
+              on_click=lambda: st.session_state.__setitem__(count_key, max(1, st.session_state[count_key] - 1)))
 
     generate = st.button("Generate monthly dashboard", type="primary", key="monthly_generate")
 
     state_key = f"monthly_ctx_{record_key}"
     if generate:
         rows = []
-        for _, r in edited_df.iterrows():
-            if not str(r.get("Week Label", "")).strip():
+        for i in range(count):
+            label = str(st.session_state[k(i, "label")]).strip()
+            if not label:
                 continue
+            dr = st.session_state[k(i, "dates")]
+            rng = format_range(dr[0], dr[1], short=True) if isinstance(dr, (tuple, list)) and len(dr) == 2 else ""
             rows.append({
-                "label": str(r["Week Label"]).strip(),
-                "range": (format_range(r["From"].date(), r["To"].date(), short=True)
-                          if pd.notna(r.get("From")) and pd.notna(r.get("To")) else ""),
-                "production": float(r.get("Production") or 0),
-                "rej_in": float(r.get("Rejection In") or 0),
-                "rej_out": float(r.get("Rejection Out") or 0),
-                "alt_in": float(r.get("Alteration In") or 0),
-                "alt_out": float(r.get("Alteration Out") or 0),
+                "label": label, "range": rng,
+                "production": float(st.session_state[k(i, "Production")] or 0),
+                "rej_in": float(st.session_state[k(i, "Rejection In")] or 0),
+                "rej_out": float(st.session_state[k(i, "Rejection Out")] or 0),
+                "alt_in": float(st.session_state[k(i, "Alteration In")] or 0),
+                "alt_out": float(st.session_state[k(i, "Alteration Out")] or 0),
                 "total_range": total_range,
             })
         if not rows:
@@ -455,14 +488,17 @@ def _render_dashboard_preview(ctx: dict, user: dict, kind: str, file_stub: str):
         html_str = build_weekly_html(ctx)
         png_bytes = render_weekly_png(ctx)
 
-    tab_png, tab_html = st.tabs(["PNG preview", "Full-design HTML preview"])
-    with tab_png:
+    is_admin = user.get("role") == "admin"
+    if is_admin:
+        tab_png, tab_html = st.tabs(["PNG preview", "Full-design HTML preview"])
+        with tab_png:
+            st.image(png_bytes, use_container_width=True)
+        with tab_html:
+            st.components.v1.html(html_str, height=900, scrolling=True)
+    else:
         st.image(png_bytes, use_container_width=True)
-    with tab_html:
-        st.components.v1.html(html_str, height=900, scrolling=True)
 
     st.markdown("##### Download")
-    is_admin = user.get("role") == "admin"
     cols = st.columns(2) if is_admin else st.columns(1)
     cols[0].download_button(
         "Download PNG", data=png_bytes, file_name=f"{file_stub}.png",
@@ -601,11 +637,11 @@ def render_admin_panel():
 def render_app():
     user = st.session_state["user"]
     with st.sidebar:
+        st.image(LOGO_PATH, width=64)
         st.markdown(f"**{COMPANY_NAME}**")
         st.caption(APP_TITLE)
         st.markdown("---")
         st.write(f"👤 **{user.get('full_name') or user['username']}**")
-        st.caption(f"Role: {user.get('role', 'user').title()}")
         if user.get("role") != "admin":
             units = user.get("units", [])
             st.caption("Units: " + (", ".join(units) if units else "none assigned"))
@@ -614,7 +650,7 @@ def render_app():
             del st.session_state["user"]
             st.rerun()
 
-    st.markdown(f"## 📊 {APP_TITLE}")
+    st.markdown(f"## {APP_TITLE}")
 
     if user.get("role") == "admin":
         tabs = st.tabs(["📅 Monthly Dashboard", "🗓️ Weekly Dashboard", "⚙️ Admin Panel"])
