@@ -104,10 +104,6 @@ _BASE_CSS = f"""
   .week-pill{{text-align:center;}}
   .week-pill .wp-label{{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:8px;}}
   .week-pill .wp-val{{font-family:'DM Mono',monospace;font-size:28px;font-weight:800;color:var(--rejection);}}
-  .footer{{margin-top:28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding-top:18px;border-top:1px solid var(--border);}}
-  .footer .sender{{font-size:15px;color:var(--muted);}}
-  .footer .sender strong{{color:var(--text);}}
-  .footer .stamp{{font-family:'DM Mono',monospace;font-size:14px;color:var(--muted);}}
   .split-grid{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:30px;}}
   .mini-card{{background:var(--card);border:1px solid var(--border);border-radius:18px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.06);}}
   .mini-card .mc-head{{display:flex;align-items:center;gap:9px;padding:16px 20px;font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:0.05em;}}
@@ -306,10 +302,6 @@ def build_monthly_html(ctx: dict) -> str:
     </div>
   </div>
 
-  <div class="footer">
-    <div class="sender">Prepared by <strong>{meta['prepared_by']}</strong> &middot; {meta['prepared_role']} &middot; {meta['prepared_email']}</div>
-    <div class="stamp">Monthly Recap &middot; {meta['month_label']}</div>
-  </div>
 </div>
 {_VLINE_SCRIPT}
 </body>
@@ -398,10 +390,6 @@ def build_weekly_html(ctx: dict) -> str:
     </div>
   </div>
 
-  <div class="footer">
-    <div class="sender">Prepared by <strong>{meta['prepared_by']}</strong> &middot; {meta['prepared_role']} &middot; {meta['prepared_email']}</div>
-    <div class="stamp">Weekly Recap &middot; {meta['period']}</div>
-  </div>
 </div>
 </body>
 </html>"""

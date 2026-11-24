@@ -248,14 +248,6 @@ def _draw_bottom_banner_monthly(ax, y0, weeks, total, height=200):
     return y0 + height + 24
 
 
-def _draw_footer(ax, y0, prepared_by, prepared_role, prepared_email, stamp):
-    ax.add_line(Line2D([28, W - 28], [y0, y0], color="#e4e6ef", linewidth=1.2, zorder=3))
-    _text(ax, 28, y0 + 22, f"Prepared by {prepared_by} · {prepared_role} · {prepared_email}",
-          size=11, color=MUTED)
-    _text(ax, W - 28, y0 + 22, stamp, size=10.5, color=MUTED, family=F_MONO, ha="right")
-    return y0 + 40
-
-
 def _render_with_autocrop(draw_fn, guess_h: float, dpi: int = 160) -> bytes:
     """Draws onto an oversized canvas (so no layout function has to predict
     exact pixel heights ahead of time), then crops the PNG to the actual
@@ -301,9 +293,7 @@ def render_monthly_png(ctx: dict, dpi: int = 160) -> bytes:
         y = _draw_section_label(ax, y, "Weekly Breakdown")
         y = _draw_weekly_table(ax, y, weeks, total, row_h=row_h)
         y = _draw_bottom_banner_monthly(ax, y, weeks, total)
-        y = _draw_footer(ax, y, meta["prepared_by"], meta["prepared_role"],
-                          meta["prepared_email"], f"Monthly Recap · {meta['month_label']}")
-        return y + 10
+        return y - 4
 
     n = max(len(weeks), 1)
     guess_h = 900 + row_h * (n + 2)
@@ -365,8 +355,6 @@ def render_weekly_png(ctx: dict, dpi: int = 160) -> bytes:
               weight="bold", ha="center", va="center")
         y += banner_h + 24
 
-        y = _draw_footer(ax, y, meta["prepared_by"], meta["prepared_role"],
-                          meta["prepared_email"], f"Weekly Recap · {meta['period']}")
-        return y + 10
+        return y - 4
 
     return _render_with_autocrop(draw, guess_h=900, dpi=dpi)
